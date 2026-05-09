@@ -27,6 +27,12 @@ echo "  UNBOUND_THREADS=${UNBOUND_THREADS}"
 echo "  UNBOUND_MSG_CACHE=${UNBOUND_MSG_CACHE}"
 echo "  UNBOUND_RRSET_CACHE=${UNBOUND_RRSET_CACHE}"
 
+# Copy config to writable temp location before sed
+# Handles read-only mounts (:ro) cleanly
+WORKING_CONFIG="/tmp/unbound.conf"
+cp "$CONFIG" "$WORKING_CONFIG"
+CONFIG="$WORKING_CONFIG"
+
 sed -i "s|interface: 0.0.0.0@5053|interface: 0.0.0.0@${UNBOUND_PORT}|g" "$CONFIG"
 sed -i "s|interface: ::0@5053|interface: ::0@${UNBOUND_PORT}|g" "$CONFIG"
 sed -i "s|num-threads: 2|num-threads: ${UNBOUND_THREADS}|g" "$CONFIG"
