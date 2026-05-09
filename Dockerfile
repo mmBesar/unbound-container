@@ -21,16 +21,22 @@ LABEL org.opencontainers.image.title="unbound-container" \
       org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.authors="mmBesar"
 
-# Install unbound and dns-root-data (provides root.key for DNSSEC)
+# Install unbound and dns-root-data
 # curl is needed to refresh root.hints at runtime
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         unbound \
         dns-root-data \
         curl \
-        ca-certificates && \
+        ca-certificates \
+        dnsutils && \
     # Remove default config — we supply our own
     rm -f /etc/unbound/unbound.conf && \
+    # Create runtime directory and set permissions
+    # unbound package creates the unbound user — verify it exists
+    id unbound && \
+    mkdir -p /var/lib/unbound && \
+    chown -R unbound:unbound /etc/unbound /var/lib/unbound && \
     # Clean up
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
@@ -38,20 +44,16 @@ RUN apt-get update && \
 # Copy our optimized config
 COPY unbound.conf /etc/unbound/unbound.conf
 
-# Copy entrypoint
+# Copy entrypoint — runs as root to refresh root.hints then drops to unbound user
 COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+RUN chmod +x /entrypoint.sh && \
+    chown unbound:unbound /etc/unbound/unbound.conf
 
-# Unbound runs as _unbound user — ensure it owns its directories
-RUN chown -R _unbound:_unbound /etc/unbound /var/lib/unbound
-
-# DNS port (internal — Pi-hole connects on this port)
+# DNS port — Pi-hole connects here
 EXPOSE 5053/udp
 EXPOSE 5053/tcp
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD nslookup -port=5053 cloudflare.com 127.0.0.1 || exit 1
-
-USER _unbound
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+    CMD nslookup -port=5053 cloudflare.com 127.0.0.1 > /dev/null 2>&1 || exit 1
 
 ENTRYPOINT ["/entrypoint.sh"]

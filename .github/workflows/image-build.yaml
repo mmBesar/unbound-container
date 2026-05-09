@@ -68,7 +68,7 @@ jobs:
 
       - name: Set up QEMU (riscv64 only)
         if: matrix.arch == 'riscv64'
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@v4
         with:
           platforms: riscv64
 
