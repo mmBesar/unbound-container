@@ -29,39 +29,35 @@ RUN apt-get update && \
         curl \
         ca-certificates \
         dnsutils && \
-    # Verify unbound user exists
     id unbound && \
-    # Create data directory — will be overridden by volume mount
-    mkdir -p /var/lib/unbound && \
-    chown unbound:unbound /var/lib/unbound && \
-    # Remove default config — we supply our own
-    rm -f /etc/unbound/unbound.conf && \
+    mkdir -p /var/lib/unbound /etc/unbound && \
+    chown unbound:unbound /var/lib/unbound /etc/unbound && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
-# Copy config and entrypoint
-COPY unbound.conf /etc/unbound/unbound.conf
-COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh && \
-    chown unbound:unbound /etc/unbound/unbound.conf
+# Default config — good general defaults, works out of the box
+# Override by mounting your own: -v /path/to/unbound.conf:/etc/unbound/unbound.conf:ro
+COPY unbound.conf /etc/unbound/unbound.conf.default
 
-# Environment variables — all configurable, nothing hardcoded
-# UNBOUND_PORT: port Unbound listens on (default 5053)
-# UNBOUND_THREADS: number of threads (default 2)
-# UNBOUND_MSG_CACHE: message cache size (default 32m)
-# UNBOUND_RRSET_CACHE: rrset cache size (default 64m)
+# Entrypoint handles root.hints, root.key, and config setup
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+# Environment variables — tune without rebuilding the image
+# Override any of these in your compose file or docker run command
 ENV UNBOUND_PORT=5053 \
     UNBOUND_THREADS=2 \
     UNBOUND_MSG_CACHE=32m \
     UNBOUND_RRSET_CACHE=64m
 
-# Data volume — root.key and root.hints persist here
+# /var/lib/unbound — persistent data (root.key, root.hints)
+# /etc/unbound    — config (mount your own unbound.conf here to override)
 VOLUME ["/var/lib/unbound"]
 
 EXPOSE 5053/udp
 EXPOSE 5053/tcp
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+HEALTHCHECK --interval=5s --timeout=3s --start-period=10s --retries=10 \
     CMD nslookup -port=5053 cloudflare.com 127.0.0.1 > /dev/null 2>&1 || exit 1
 
 ENTRYPOINT ["/entrypoint.sh"]
