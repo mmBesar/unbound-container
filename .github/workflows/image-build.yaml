@@ -1,47 +1,76 @@
 name: Build and Publish Container Image
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - 'Dockerfile'
-      - 'unbound.conf.sample'
-      - 'entrypoint.sh'
-      - 'UPSTREAM_VERSION'
-      - '.github/workflows/image-build.yaml'
   schedule:
-    # Rebuild weekly on Sundays at 02:00 UTC
-    # Picks up updated Debian packages automatically
+    # Check for new Unbound version every Sunday at 02:00 UTC
     - cron: '0 2 * * 0'
   workflow_dispatch:
+    inputs:
+      force_build:
+        description: 'Force rebuild even if version unchanged'
+        required: false
+        default: 'false'
+        type: boolean
 
 env:
   IMAGE_NAME: ghcr.io/mmbesar/unbound-container
 
 jobs:
-  prepare:
-    name: Prepare Build Context
+  check-version:
+    name: Check Unbound version
     runs-on: ubuntu-24.04
     outputs:
-      version: ${{ steps.check.outputs.version }}
-      build_date: ${{ steps.check.outputs.build_date }}
+      should_build: ${{ steps.version.outputs.should_build }}
+      version: ${{ steps.version.outputs.version }}
+      build_date: ${{ steps.version.outputs.build_date }}
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
 
-      - name: Read version and build date
-        id: check
+      - name: Detect latest Unbound version from Debian Trixie
+        id: version
         run: |
-          VERSION=$(cat UPSTREAM_VERSION 2>/dev/null | tr -d '[:space:]' || echo "unknown")
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "build_date=$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >> $GITHUB_OUTPUT
-          echo "Building unbound-container version: $VERSION"
+          # Query Debian Trixie package index for current Unbound version
+          DEBIAN_VERSION=$(docker run --rm debian:trixie-slim sh -c \
+            'apt-get update -qq 2>/dev/null && \
+             apt-cache show unbound 2>/dev/null | \
+             grep "^Version:" | head -1 | \
+             sed "s/Version: //" | \
+             cut -d- -f1')
+
+          if [ -z "$DEBIAN_VERSION" ]; then
+            echo "ERROR: Could not detect Debian Unbound version"
+            exit 1
+          fi
+
+          echo "Detected Debian Unbound version: ${DEBIAN_VERSION}"
+
+          # Read currently tracked version
+          CURRENT_VERSION=$(cat UPSTREAM_VERSION 2>/dev/null | tr -d '[:space:]' || echo "none")
+          echo "Current tracked version: ${CURRENT_VERSION}"
+
+          BUILD_DATE=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+
+          echo "version=${DEBIAN_VERSION}" >> $GITHUB_OUTPUT
+          echo "build_date=${BUILD_DATE}" >> $GITHUB_OUTPUT
+
+          # Build if version changed or force_build requested
+          if [ "${DEBIAN_VERSION}" != "${CURRENT_VERSION}" ]; then
+            echo "New version detected — will build"
+            echo "should_build=true" >> $GITHUB_OUTPUT
+          elif [ "${{ github.event.inputs.force_build }}" = "true" ]; then
+            echo "Force build requested — will build"
+            echo "should_build=true" >> $GITHUB_OUTPUT
+          else
+            echo "Version unchanged — skipping build"
+            echo "should_build=false" >> $GITHUB_OUTPUT
+          fi
 
   build:
     name: Build/${{ matrix.arch }}
-    needs: prepare
+    needs: check-version
+    if: needs.check-version.outputs.should_build == 'true'
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -60,7 +89,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
 
       - name: Get short SHA
         id: sha
@@ -83,7 +112,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push ${{ matrix.arch }}
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
@@ -91,17 +120,18 @@ jobs:
           push: true
           tags: |
             ${{ env.IMAGE_NAME }}:latest-${{ matrix.arch }}
-            ${{ env.IMAGE_NAME }}:${{ needs.prepare.outputs.version }}-${{ matrix.arch }}
+            ${{ env.IMAGE_NAME }}:${{ needs.check-version.outputs.version }}-${{ matrix.arch }}
           build-args: |
-            VERSION=${{ needs.prepare.outputs.version }}
-            BUILD_DATE=${{ needs.prepare.outputs.build_date }}
+            VERSION=${{ needs.check-version.outputs.version }}
+            BUILD_DATE=${{ needs.check-version.outputs.build_date }}
             VCS_REF=${{ steps.sha.outputs.sha }}
           cache-from: type=registry,ref=${{ env.IMAGE_NAME }}:cache-${{ matrix.arch }}
           cache-to: type=registry,ref=${{ env.IMAGE_NAME }}:cache-${{ matrix.arch }},mode=max
 
   manifest:
     name: Create multi-arch manifest
-    needs: [prepare, build]
+    needs: [check-version, build]
+    if: needs.check-version.outputs.should_build == 'true'
     runs-on: ubuntu-24.04
     permissions:
       packages: write
@@ -119,16 +149,14 @@ jobs:
 
       - name: Create and push manifests
         run: |
-          VERSION=${{ needs.prepare.outputs.version }}
+          VERSION=${{ needs.check-version.outputs.version }}
 
-          # latest — points to all three arches
           docker buildx imagetools create \
             --tag ${{ env.IMAGE_NAME }}:latest \
             ${{ env.IMAGE_NAME }}:latest-amd64 \
             ${{ env.IMAGE_NAME }}:latest-arm64 \
             ${{ env.IMAGE_NAME }}:latest-riscv64
 
-          # version tag — e.g. 1.22.0
           docker buildx imagetools create \
             --tag ${{ env.IMAGE_NAME }}:${VERSION} \
             ${{ env.IMAGE_NAME }}:${VERSION}-amd64 \
@@ -136,3 +164,25 @@ jobs:
             ${{ env.IMAGE_NAME }}:${VERSION}-riscv64
 
           echo "Manifests created for latest and ${VERSION}"
+
+  update-version:
+    name: Update UPSTREAM_VERSION
+    needs: [check-version, manifest]
+    if: needs.check-version.outputs.should_build == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Update UPSTREAM_VERSION and commit
+        run: |
+          VERSION=${{ needs.check-version.outputs.version }}
+          echo "${VERSION}" > UPSTREAM_VERSION
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add UPSTREAM_VERSION
+          git commit -m "chore: bump Unbound to ${VERSION} [skip ci]"
+          git push
