@@ -1,13 +1,23 @@
-# hs2 — unbound.conf
-# Personal config for mmBesar's home server
-# Mount this file over the default:
+# unbound-container — unbound.conf.sample
+# Copy this file to unbound.conf and customize for your setup.
+# Mount it into the container:
 #   volumes:
-#     - ${CONTAINER_DIR}/unbound/unbound.conf:/etc/unbound/unbound.conf:ro
+#     - /path/to/unbound.conf:/etc/unbound/unbound.conf:ro
 #
-# Based on unbound-container defaults with home network additions
+# Environment variables (set in compose) override:
+#   UNBOUND_PORT      — listening port (default: 5053)
+#   UNBOUND_THREADS   — CPU threads (default: 2)
+#   UNBOUND_MSG_CACHE — message cache size (default: 32m)
+#   UNBOUND_RRSET_CACHE — rrset cache size (default: 64m)
+#
+# github.com/mmBesar/unbound-container
 
 server:
 
+    # ── Modules ───────────────────────────────────────────────────────────────
+    # validator: DNSSEC validation
+    # iterator:  recursive resolution
+    # subnetcache is excluded — conflicts with serve-expired and prefetch
     module-config: "validator iterator"
 
     # ── Network ───────────────────────────────────────────────────────────────
@@ -15,6 +25,8 @@ server:
     interface: 0.0.0.0@5053
     interface: ::0@5053
 
+    # Accept queries from private networks and localhost only
+    # Unbound should never be exposed to the internet directly
     access-control: 0.0.0.0/0 refuse
     access-control: ::0/0 refuse
     access-control: 127.0.0.0/8 allow
@@ -25,29 +37,48 @@ server:
     access-control: fc00::/7 allow
 
     # ── Performance ───────────────────────────────────────────────────────────
-    # Overridden by env vars — kept here for reference
+    # These values are overridden by env vars — kept here for reference
     num-threads: 2
     msg-cache-size: 32m
     rrset-cache-size: 64m
+
+    # Slabs — power of 2, >= num-threads
     msg-cache-slabs: 4
     rrset-cache-slabs: 4
     infra-cache-slabs: 4
     key-cache-slabs: 4
+
+    # Cache TTL limits
     cache-min-ttl: 60
     cache-max-ttl: 86400
+
+    # Prefetch records before expiry — keeps cache warm
     prefetch: yes
     prefetch-key: yes
+
+    # Serve stale records while refreshing — reduces latency
     serve-expired: yes
     serve-expired-ttl: 3600
+
+    # Aggressive NSEC — faster negative answers with DNSSEC
     aggressive-nsec: yes
 
     # ── Privacy ───────────────────────────────────────────────────────────────
+    # Send minimum required labels to each nameserver
+    # Reduces what root/TLD servers learn about your queries
     qname-minimisation: yes
+
+    # Don't reveal Unbound version or hostname
     hide-identity: yes
     hide-version: yes
 
     # ── Security / DNSSEC ─────────────────────────────────────────────────────
+    # trust-anchor-file: uses root.key as-is without fetching at startup
+    # This avoids chicken-and-egg DNS failures in container environments
+    # unbound-anchor in entrypoint.sh keeps the key updated on each start
     trust-anchor-file: "/var/lib/unbound/root.key"
+
+    # Hardening options
     harden-glue: yes
     harden-dnssec-stripped: yes
     harden-below-nxdomain: yes
@@ -55,9 +86,12 @@ server:
     harden-algo-downgrade: yes
     harden-short-bufsize: yes
     harden-large-queries: yes
+
+    # 0x20 random case encoding — makes cache poisoning harder
+    # Set to 'no' if certain domains fail to resolve (see Troubleshooting in README)
     use-caps-for-id: no
 
-    # DNS rebinding protection
+    # DNS rebinding protection — blocks private IPs in public DNS responses
     private-address: 10.0.0.0/8
     private-address: 172.16.0.0/12
     private-address: 192.168.0.0/16
@@ -66,34 +100,44 @@ server:
     private-address: fe80::/10
 
     # ── Local domains ─────────────────────────────────────────────────────────
-    # Standard RFC local domains
+    # Standard RFC-reserved local domains — handled by Pi-hole or local DNS
+    # Add your own local TLD here (e.g. "home.arpa", "lan", "yourdomain")
     private-domain: "local"
     private-domain: "lan"
     private-domain: "home"
     private-domain: "internal"
+    private-domain: "intranet"
+    private-domain: "corp"
     domain-insecure: "local"
     domain-insecure: "lan"
     domain-insecure: "home"
     domain-insecure: "internal"
+    domain-insecure: "intranet"
+    domain-insecure: "corp"
 
-    # Your local TLD — all .mm domains handled by Pi-hole
-    private-domain: "mm"
-    domain-insecure: "mm"
+    # Add your custom local TLD here:
+    # private-domain: "yourtld"
+    # domain-insecure: "yourtld"
 
-    # ── Domains with broken or missing DNSSEC ────────────────────────────────
-    # Test a domain: docker exec pihole dig @unbound -p 5053 domain.com +dnssec
-    # If result is SERVFAIL — add it below
-    # Example:
+    # ── Domains with broken/missing DNSSEC ───────────────────────────────────
+    # Some domains fail DNSSEC validation due to misconfiguration on their end.
+    # To diagnose: docker exec pihole dig @unbound -p 5053 domain.com +dnssec
+    # If result is SERVFAIL — add the domain or its TLD here.
+    # See README Troubleshooting section for details.
+    #
+    # Examples (uncomment and adjust as needed):
     # domain-insecure: "example-bank.com"
-    domain-insecure: "faisalbank.com.eg"
+    # domain-insecure: "example.com.eg"   # entire country TLD
 
     # ── Root hints ────────────────────────────────────────────────────────────
     root-hints: "/var/lib/unbound/root.hints"
 
     # ── Privileges ───────────────────────────────────────────────────────────
+    # Drop privileges after binding to port
     username: "unbound"
 
     # ── Logging ───────────────────────────────────────────────────────────────
+    # verbosity: 0=errors only 1=info 2=detail 3=queries 4=algorithm
     verbosity: 1
     log-queries: no
     log-replies: no
@@ -105,7 +149,13 @@ server:
     do-ip6: yes
     do-udp: yes
     do-tcp: yes
+
+    # EDNS buffer — RFC 8200 recommended safe value
     edns-buffer-size: 1232
+
+    # Connection limits
     outgoing-range: 8192
     num-queries-per-thread: 4096
+
+    # Smaller responses — less bandwidth
     minimal-responses: yes

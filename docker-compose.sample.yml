@@ -1,0 +1,66 @@
+# unbound-container — docker-compose.sample.yml
+# Copy to docker-compose.yml and adjust for your setup.
+# See .env.sample for required environment variables.
+#
+# Typical usage with Pi-hole:
+#   Pi-hole forwards DNS to Unbound on 127.0.0.1:5053
+#   Unbound resolves recursively against root servers
+#
+# github.com/mmBesar/unbound-container
+
+services:
+
+  unbound:
+    image: ghcr.io/mmbesar/unbound-container:latest
+    container_name: unbound
+
+    # Share Pi-hole's network stack so Pi-hole can reach Unbound via 127.0.0.1
+    # This avoids hostname resolution issues in dnsmasq
+    network_mode: "service:pihole"
+
+    # Unbound needs Pi-hole's network namespace to exist first
+    depends_on:
+      pihole:
+        condition: service_started
+
+    environment:
+      # Port Unbound listens on — must match Pi-hole's upstream setting
+      UNBOUND_PORT: "5053"
+      # Threads — set to half your CPU cores for balanced performance
+      UNBOUND_THREADS: "2"
+      # Cache sizes — rrset should be 2x msg for optimal DNSSEC performance
+      UNBOUND_MSG_CACHE: "32m"
+      UNBOUND_RRSET_CACHE: "64m"
+
+    volumes:
+      # Persistent data — root.key and root.hints survive container restarts
+      - ${CONTAINER_DIR}/unbound/data:/var/lib/unbound
+      # Custom config — copy unbound.conf.sample to unbound.conf and customize
+      - ${CONTAINER_DIR}/unbound/unbound.conf:/etc/unbound/unbound.conf:ro
+      # Timezone sync
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+
+    restart: always
+
+  pihole:
+    image: pihole/pihole:latest
+    container_name: pihole
+
+    # Unbound shares this container's network stack via network_mode above
+    networks:
+      - your_network  # replace with your network name
+
+    environment:
+      TZ: ${TZ}
+      FTLCONF_webserver_api_password: ${ADMIN_PASSWORD}
+      # Point Pi-hole to Unbound via localhost
+      # Unbound shares Pi-hole's network stack so 127.0.0.1 works
+      FTLCONF_dns_upstreams: "127.0.0.1#5053"
+      # ~15 seconds of DNS errors at startup while Unbound primes is normal
+      # Everything works correctly once Unbound is ready
+
+    volumes:
+      - ${CONTAINER_DIR}/pihole:/etc/pihole
+
+    restart: always
