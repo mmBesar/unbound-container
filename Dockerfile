@@ -37,7 +37,7 @@ RUN apt-get update && \
 
 # Default config — good general defaults, works out of the box
 # Override by mounting your own: -v /path/to/unbound.conf:/etc/unbound/unbound.conf:ro
-COPY unbound.conf /etc/unbound/unbound.conf.default
+COPY unbound.conf.sample /etc/unbound/unbound.conf.default
 
 # Entrypoint handles root.hints, root.key, and config setup
 COPY entrypoint.sh /entrypoint.sh
